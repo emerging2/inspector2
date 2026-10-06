@@ -5,9 +5,24 @@
 CMC COLLECTOR 2 — RANGO 201-300
 
 Objetivo:
-    Construir un histórico exclusivamente de las monedas
-    que actualmente ocupan las posiciones 201-300 de
-    CoinMarketCap.
+    Construir un histórico del rango 201-300 de CoinMarketCap
+    para estudiar:
+
+    - monedas que empiezan a subir antes del pump
+    - acumulación
+    - expansión de volumen
+    - compresión
+    - mejora de ranking
+    - fuerza relativa
+    - rotación de capital
+    - monedas 201-300 que empiezan a entrar hacia Top 200
+    - posibles patrones previos a grandes movimientos
+
+IMPORTANTE:
+    Se consulta el TOP 300 completo para calcular correctamente
+    los rankings y métricas relativas.
+
+    SOLAMENTE se guardan las monedas 201-300.
 
 Uso:
 
@@ -42,12 +57,11 @@ CMC_API_URL = (
     "cryptocurrency/listings/latest"
 )
 
-# ============================================================
-# ESTE RECOLECTOR SOLAMENTE CAPTURA 201-300
-# ============================================================
+TOP_N = 300
 
-START_RANK = 201
-TOP_N = 100
+TOP100_MAX = 100
+TOP200_MAX = 200
+TOP300_MAX = 300
 
 
 # ============================================================
@@ -56,17 +70,11 @@ TOP_N = 100
 
 DATA_DIR = Path("data") / "cmc"
 
-CSV_201_300 = (
-    DATA_DIR / "market_history_201_300.csv"
-)
+# ESTE RECOLECTOR GUARDA SOLAMENTE 201-300
+CSV_201_300 = DATA_DIR / "market_history_201_300.csv"
 
-ROTATION_FILE = (
-    DATA_DIR / "last_rotation.txt"
-)
-
-ARCHIVE_DIR = (
-    DATA_DIR / "archives"
-)
+ROTATION_FILE = DATA_DIR / "last_rotation.txt"
+ARCHIVE_DIR = DATA_DIR / "archives"
 
 DIAS_ROTACION = 5
 
@@ -88,19 +96,12 @@ GITHUB_BRANCH = "main"
 
 def enviar_telegram(msg):
 
-    token = os.getenv(
-        "TELEGRAM_BOT_TOKEN"
-    )
-
-    chat_id = os.getenv(
-        "TELEGRAM_CHAT_ID"
-    )
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
     if not token or not chat_id:
 
-        print(
-            "Telegram no configurado"
-        )
+        print("Telegram no configurado")
 
         return False
 
@@ -124,17 +125,12 @@ def enviar_telegram(msg):
 
         return (
             r.status_code == 200
-            and r.json().get(
-                "ok",
-                False
-            )
+            and r.json().get("ok", False)
         )
 
     except Exception as e:
 
-        print(
-            f"Error Telegram: {e}"
-        )
+        print(f"Error Telegram: {e}")
 
         return False
 
@@ -221,8 +217,7 @@ def rotar_csv():
     if not CSV_201_300.exists():
 
         print(
-            "No hay CSV 201-300 "
-            "para rotar."
+            "No hay CSV 201-300 para rotar."
         )
 
         return None
@@ -384,12 +379,12 @@ CSV_COLUMNS = [
     "is_top200",
     "is_top300",
 
-    # Rankings
+    # Rankings del snapshot
     "rank_gainer_300",
     "rank_loser_300",
     "rank_volume_300",
 
-    # Ranking dentro del segmento 201-300
+    # Ranking por segmento
     "rank_gainer_segment",
     "rank_volume_segment",
 
@@ -443,6 +438,23 @@ def create_snapshot_id(timestamp):
     )
 
 
+def segmento(rank):
+
+    if rank <= 100:
+
+        return "top100"
+
+    if rank <= 200:
+
+        return "101_200"
+
+    if rank <= 300:
+
+        return "201_300"
+
+    return "outside"
+
+
 # ============================================================
 # FETCH CMC
 # ============================================================
@@ -451,41 +463,35 @@ def fetch_monedas(api_key):
 
     headers = {
 
-        "Accepts":
-            "application/json",
+        "Accepts": "application/json",
 
-        "X-CMC_PRO_API_KEY":
-            api_key,
+        "X-CMC_PRO_API_KEY": api_key,
+
     }
 
     params = {
 
-        # ====================================================
-        # SOLAMENTE POSICIONES 201-300
-        # ====================================================
+        # IMPORTANTE:
+        # Consultamos TOP 300 completo para poder
+        # calcular rankings relativos correctamente.
 
-        "start":
-            START_RANK,
+        "start": 1,
 
-        "limit":
-            TOP_N,
+        "limit": TOP_N,
 
-        "convert":
-            "USD",
+        "convert": "USD",
 
-        "sort":
-            "market_cap",
+        "sort": "market_cap",
 
-        "sort_dir":
-            "desc",
+        "sort_dir": "desc",
 
-        "cryptocurrency_type":
-            "all",
+        "cryptocurrency_type": "all",
+
     }
 
     print(
-        "Consultando CoinMarketCap "
-        "(RANGO 201-300)..."
+        f"Consultando CoinMarketCap "
+        f"(TOP {TOP_N})..."
     )
 
     r = requests.get(
@@ -595,8 +601,7 @@ def calculate_rankings(coins):
         coins,
         key=lambda c: (
             change_24h(c)
-            if change_24h(c)
-            is not None
+            if change_24h(c) is not None
             else float("inf")
         )
     )
@@ -605,8 +610,7 @@ def calculate_rankings(coins):
         coins,
         key=lambda c: (
             change_24h(c)
-            if change_24h(c)
-            is not None
+            if change_24h(c) is not None
             else float("-inf")
         ),
         reverse=True,
@@ -616,8 +620,7 @@ def calculate_rankings(coins):
         coins,
         key=lambda c: (
             volume(c)
-            if volume(c)
-            is not None
+            if volume(c) is not None
             else float("-inf")
         ),
         reverse=True,
@@ -651,89 +654,120 @@ def calculate_rankings(coins):
                 start=1
             )
         },
+
     )
 
 
-# ============================================================
-# RANKINGS DEL SEGMENTO 201-300
-# ============================================================
+def calculate_segment_rankings(coins):
 
-def calculate_segment_rankings(
-    coins
-):
+    resultado = {}
 
-    def change_24h(c):
+    segmentos = {
 
-        return safe_float(
-            c.get(
-                "quote",
-                {}
-            ).get(
-                "USD",
-                {}
-            ).get(
-                "percent_change_24h"
-            )
-        )
+        "top100": [],
 
-    def volume(c):
+        "101_200": [],
 
-        return safe_float(
-            c.get(
-                "quote",
-                {}
-            ).get(
-                "USD",
-                {}
-            ).get(
-                "volume_24h"
-            )
-        )
+        "201_300": [],
 
-    gainers = sorted(
-        coins,
-        key=lambda c:
-            change_24h(c)
-            if change_24h(c)
-            is not None
-            else float("-inf"),
-        reverse=True,
-    )
-
-    volumes = sorted(
-        coins,
-        key=lambda c:
-            volume(c)
-            if volume(c)
-            is not None
-            else float("-inf"),
-        reverse=True,
-    )
-
-    return {
-
-        "gainer": {
-
-            c["id"]: p
-
-            for p, c
-            in enumerate(
-                gainers,
-                start=1
-            )
-        },
-
-        "volume": {
-
-            c["id"]: p
-
-            for p, c
-            in enumerate(
-                volumes,
-                start=1
-            )
-        },
     }
+
+    for coin in coins:
+
+        rank = (
+            coin.get("cmc_rank")
+            or 99999
+        )
+
+        seg = segmento(rank)
+
+        if seg in segmentos:
+
+            segmentos[seg].append(
+                coin
+            )
+
+    for seg, lista in segmentos.items():
+
+        if not lista:
+
+            continue
+
+        def ch(c):
+
+            return safe_float(
+                c.get(
+                    "quote",
+                    {}
+                ).get(
+                    "USD",
+                    {}
+                ).get(
+                    "percent_change_24h"
+                )
+            )
+
+        def vol(c):
+
+            return safe_float(
+                c.get(
+                    "quote",
+                    {}
+                ).get(
+                    "USD",
+                    {}
+                ).get(
+                    "volume_24h"
+                )
+            )
+
+        gainers = sorted(
+            lista,
+            key=lambda c:
+                ch(c)
+                if ch(c) is not None
+                else float("-inf"),
+            reverse=True,
+        )
+
+        volumes = sorted(
+            lista,
+            key=lambda c:
+                vol(c)
+                if vol(c) is not None
+                else float("-inf"),
+            reverse=True,
+        )
+
+        resultado[seg] = {
+
+            "gainer": {
+
+                c["id"]: p
+
+                for p, c
+                in enumerate(
+                    gainers,
+                    start=1
+                )
+
+            },
+
+            "volume": {
+
+                c["id"]: p
+
+                for p, c
+                in enumerate(
+                    volumes,
+                    start=1
+                )
+
+            },
+
+        }
+
+    return resultado
 
 
 # ============================================================
@@ -778,34 +812,30 @@ def build_records(
         )
 
         rank = (
-            coin.get(
-                "cmc_rank"
-            )
+            coin.get("cmc_rank")
             or 99999
         )
 
+        seg = segmento(rank)
+
         # ====================================================
-        # ESTOS REGISTROS SON 201-300
+        # SOLAMENTE 201-300
         # ====================================================
 
-        seg = "201_300"
+        if seg != "201_300":
+
+            continue
 
         price = safe_float(
-            q.get(
-                "price"
-            )
+            q.get("price")
         )
 
         volume_24h = safe_float(
-            q.get(
-                "volume_24h"
-            )
+            q.get("volume_24h")
         )
 
         market_cap = safe_float(
-            q.get(
-                "market_cap"
-            )
+            q.get("market_cap")
         )
 
         # ====================================================
@@ -837,25 +867,27 @@ def build_records(
 
             marketcap_volume_ratio = None
 
-        # ====================================================
-        # RANKING DENTRO DE 201-300
-        # ====================================================
+        seg_gainer = None
 
-        seg_gainer = (
-            segment_rankings[
-                "gainer"
-            ].get(
-                coin.get("id")
-            )
-        )
+        seg_volume = None
 
-        seg_volume = (
-            segment_rankings[
-                "volume"
-            ].get(
-                coin.get("id")
+        if seg in segment_rankings:
+
+            seg_gainer = (
+                segment_rankings[seg]
+                ["gainer"]
+                .get(
+                    coin.get("id")
+                )
             )
-        )
+
+            seg_volume = (
+                segment_rankings[seg]
+                ["volume"]
+                .get(
+                    coin.get("id")
+                )
+            )
 
         records.append({
 
@@ -866,24 +898,16 @@ def build_records(
                 timestamp.isoformat(),
 
             "cmc_id":
-                coin.get(
-                    "id"
-                ),
+                coin.get("id"),
 
             "name":
-                coin.get(
-                    "name"
-                ),
+                coin.get("name"),
 
             "symbol":
-                coin.get(
-                    "symbol"
-                ),
+                coin.get("symbol"),
 
             "slug":
-                coin.get(
-                    "slug"
-                ),
+                coin.get("slug"),
 
             "cmc_rank":
                 rank,
@@ -971,8 +995,6 @@ def build_records(
             "is_top300":
                 1,
 
-            # Rankings dentro de las 100 monedas
-            # capturadas (201-300)
             "rank_gainer_300":
                 gainer_rank.get(
                     coin.get("id")
@@ -993,6 +1015,7 @@ def build_records(
 
             "rank_volume_segment":
                 seg_volume,
+
         })
 
     return records
@@ -1012,9 +1035,7 @@ def save_records(
         exist_ok=True
     )
 
-    file_exists = (
-        archivo.exists()
-    )
+    file_exists = archivo.exists()
 
     with archivo.open(
         "a",
@@ -1050,18 +1071,14 @@ def main():
 
     print()
 
-    print(
-        "=" * 100
-    )
+    print("=" * 100)
 
     print(
         "🚨 CMC COLLECTOR — "
         "RANGO 201-300"
     )
 
-    print(
-        "=" * 100
-    )
+    print("=" * 100)
 
     # --------------------------------------------------------
     # ROTACIÓN
@@ -1096,8 +1113,10 @@ def main():
 
         if ultima:
 
-            ahora = datetime.now(
-                timezone.utc
+            ahora = (
+                datetime.now(
+                    timezone.utc
+                )
             )
 
             if ultima.tzinfo is None:
@@ -1110,8 +1129,7 @@ def main():
 
             dias_transcurridos = (
                 ahora - ultima
-            ).total_seconds()
-                / 86400
+            ).total_seconds() / 86400
 
             dias_restantes = max(
                 0,
@@ -1131,8 +1149,10 @@ def main():
 
     api_key = get_api_key()
 
-    timestamp = datetime.now(
-        timezone.utc
+    timestamp = (
+        datetime.now(
+            timezone.utc
+        )
     )
 
     coins = fetch_monedas(
@@ -1140,34 +1160,62 @@ def main():
     )
 
     # --------------------------------------------------------
-    # COMPROBACIÓN
+    # CONTAR SEGMENTOS
     # --------------------------------------------------------
+
+    top100 = []
+
+    rango101_200 = []
+
+    rango201_300 = []
+
+    for coin in coins:
+
+        rank = (
+            coin.get(
+                "cmc_rank"
+            )
+            or 99999
+        )
+
+        if rank <= 100:
+
+            top100.append(
+                coin
+            )
+
+        elif rank <= 200:
+
+            rango101_200.append(
+                coin
+            )
+
+        elif rank <= 300:
+
+            rango201_300.append(
+                coin
+            )
 
     print()
 
     print(
-        "Rango recibido:"
+        "División TOP 300:"
     )
 
-    if coins:
+    print(
+        f"  TOP 100:   "
+        f"{len(top100)}"
+    )
 
-        first_rank = coins[0].get(
-            "cmc_rank"
-        )
+    print(
+        f"  101-200:   "
+        f"{len(rango101_200)}"
+    )
 
-        last_rank = coins[-1].get(
-            "cmc_rank"
-        )
-
-        print(
-            f"  Primera posición: "
-            f"{first_rank}"
-        )
-
-        print(
-            f"  Última posición: "
-            f"{last_rank}"
-        )
+    print(
+        f"  201-300:   "
+        f"{len(rango201_300)}"
+    )
 
     # --------------------------------------------------------
     # CONSTRUIR REGISTROS
@@ -1179,7 +1227,7 @@ def main():
     )
 
     # --------------------------------------------------------
-    # GUARDAR
+    # GUARDAR SOLAMENTE 201-300
     # --------------------------------------------------------
 
     save_records(
@@ -1193,17 +1241,13 @@ def main():
 
     print()
 
-    print(
-        "=" * 100
-    )
+    print("=" * 100)
 
     print(
         "✅ CAPTURA 201-300 FINALIZADA"
     )
 
-    print(
-        "=" * 100
-    )
+    print("=" * 100)
 
     print(
         f"Snapshot: "
