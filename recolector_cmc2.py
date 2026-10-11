@@ -30,7 +30,7 @@ Uso:
 
 Requiere:
 
-    pip install requests
+    pip install requests pandas
 
 Variables:
 
@@ -45,6 +45,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import pandas as pd
 import requests
 
 
@@ -77,6 +78,7 @@ ROTATION_FILE = DATA_DIR / "last_rotation.txt"
 ARCHIVE_DIR = DATA_DIR / "archives"
 
 DIAS_ROTACION = 5
+HORAS_RETENCION_CSV = 72   # conservar 72h en el CSV activo tras rotar
 
 TIMEOUT = 30
 
@@ -213,6 +215,10 @@ def toca_rotar():
 
 
 def rotar_csv():
+    """
+    Rota el CSV 201-300 conservando 72h en el CSV activo.
+    El resto se mueve al archive (que se puede borrar tras descargar).
+    """
 
     if not CSV_201_300.exists():
 
@@ -235,40 +241,151 @@ def rotar_csv():
         "%Y%m%d_%H%M"
     )
 
-    destino = (
-        ARCHIVE_DIR
-        / f"201_300_{sufijo}.csv"
+    # --------------------------------------------------------
+    # LEER CSV ACTUAL
+    # --------------------------------------------------------
+
+    try:
+
+        df = pd.read_csv(
+            CSV_201_300
+        )
+
+    except Exception as e:
+
+        print(
+            f"Error leyendo "
+            f"{CSV_201_300.name}: {e}"
+        )
+
+        return None
+
+    if len(df) == 0:
+
+        print(
+            f"{CSV_201_300.name} vacío, "
+            f"se omite"
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # NORMALIZAR TIMESTAMP
+    # --------------------------------------------------------
+
+    df["timestamp"] = pd.to_datetime(
+        df["timestamp"],
+        utc=True,
+        errors="coerce",
     )
 
-    CSV_201_300.rename(
-        destino
+    df = df.dropna(
+        subset=["timestamp"]
     )
 
-    tamaño = (
-        destino.stat().st_size
-        / (1024 * 1024)
+    df = df.sort_values(
+        "timestamp"
     )
+
+    # --------------------------------------------------------
+    # CORTE 72H
+    # --------------------------------------------------------
+
+    ts_max = df["timestamp"].max()
+
+    corte = (
+        ts_max
+        - timedelta(
+            hours=HORAS_RETENCION_CSV
+        )
+    )
+
+    df_reciente = df[
+        df["timestamp"] >= corte
+    ].copy()
+
+    df_viejo = df[
+        df["timestamp"] < corte
+    ].copy()
+
+    # --------------------------------------------------------
+    # ARCHIVE: SOLO LO VIEJO
+    # --------------------------------------------------------
+
+    tamaño_archive = 0
+
+    destino = None
+
+    if len(df_viejo) > 0:
+
+        destino = (
+            ARCHIVE_DIR
+            / f"201_300_{sufijo}.csv"
+        )
+
+        df_viejo.to_csv(
+            destino,
+            index=False,
+        )
+
+        tamaño_archive = (
+            destino.stat().st_size
+            / (1024 * 1024)
+        )
+
+        print(
+            f"Archivado 201-300: "
+            f"{len(df_viejo):,} filas "
+            f"({tamaño_archive:.2f} MB)"
+        )
+
+    else:
+
+        print(
+            f"201-300: nada que archivar "
+            f"(todo dentro de "
+            f"{HORAS_RETENCION_CSV}h)"
+        )
+
+    # --------------------------------------------------------
+    # CSV ACTIVO: SOLO ÚLTIMAS 72H
+    # --------------------------------------------------------
+
+    df_reciente.to_csv(
+        CSV_201_300,
+        index=False,
+    )
+
+    print(
+        f"CSV 201-300 conserva "
+        f"{len(df_reciente):,} filas "
+        f"(desde "
+        f"{df_reciente['timestamp'].min()} "
+        f"hasta {ts_max})"
+    )
+
+    # --------------------------------------------------------
+    # INFO PARA TELEGRAM
+    # --------------------------------------------------------
 
     info = {
 
         "fecha": ahora,
 
-        "archivos": [
-            {
-                "nombre": destino.name,
-                "tipo": "201_300",
-                "tamaño_mb": tamaño,
-            }
-        ],
+        "archivos": (
+            [
+                {
+                    "nombre": destino.name,
+                    "tipo": "201_300",
+                    "tamaño_mb": tamaño_archive,
+                }
+            ]
+            if destino is not None and tamaño_archive > 0
+            else []
+        ),
 
-        "tamaño_total_mb": tamaño,
+        "tamaño_total_mb": tamaño_archive,
     }
-
-    print(
-        f"Rotado 201-300: "
-        f"{destino.name} "
-        f"({tamaño:.2f} MB)"
-    )
 
     guardar_ultima_rotacion(
         ahora
