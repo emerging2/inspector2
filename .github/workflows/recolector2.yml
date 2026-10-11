@@ -1,8 +1,6 @@
 name: CMC Collector 201-300
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -42,11 +40,18 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          if [ -d data/cmc/archives ]; then
+            for tipo in 201_300; do
+              ls -t data/cmc/archives/${tipo}_*.csv 2>/dev/null | tail -n +2 | xargs rm -f 2>/dev/null || true
+            done
+          fi
+
           git add data/cmc/
 
           if git diff --cached --quiet; then
             echo "No hay cambios para guardar."
           else
             git commit -m "Update CMC 201-300 history"
+            git pull --rebase origin main || true
             git push
           fi
