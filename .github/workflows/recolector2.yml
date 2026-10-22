@@ -55,9 +55,6 @@ jobs:
 
           git add data/cmc/
 
-          if git diff --cached --quiet; then
-            echo "No hay cambios."
-          else
-            git commit -m "Update CMC 201-300 history"
-            git push
-          fi
+          # FORZAR commit y push siempre
+          git commit --allow-empty -m "Update CMC 201-300 history"
+          git push
