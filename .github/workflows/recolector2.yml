@@ -40,6 +40,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          # Limpiar archivos viejos de archives (solo mantener el último)
           if [ -d data/cmc/archives ]; then
             for tipo in 201_300; do
               ls -t data/cmc/archives/${tipo}_*.csv 2>/dev/null | tail -n +2 | xargs rm -f 2>/dev/null || true
@@ -48,10 +49,14 @@ jobs:
 
           git add data/cmc/
 
+          # FORZAR el commit: si hay cambios en el CSV, los sube. Si no, igual hace commit.
           if git diff --cached --quiet; then
-            echo "No hay cambios para guardar."
+            echo "No hay cambios en el CSV, pero forzamos el push del archivo limpio."
+            # Forzar el commit del archivo actual (aunque no haya cambios)
+            git commit --allow-empty -m "Force clean 201-300 cache"
           else
             git commit -m "Update CMC 201-300 history"
-            git pull --rebase origin main || true
-            git push
           fi
+
+          git pull --rebase origin main || true
+          git push
