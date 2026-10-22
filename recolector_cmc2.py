@@ -77,7 +77,7 @@ CSV_201_300 = DATA_DIR / "market_history_201_300.csv"
 ROTATION_FILE = DATA_DIR / "last_rotation.txt"
 ARCHIVE_DIR = DATA_DIR / "archives"
 
-DIAS_ROTACION = 5
+DIAS_ROTACION = 3
 HORAS_RETENCION_CSV = 72   # conservar 72h en el CSV activo tras rotar
 
 TIMEOUT = 30
@@ -392,6 +392,65 @@ def rotar_csv():
     )
 
     return info
+
+
+def limpiar_csv_viejo(csv_path, tipo):
+    """
+    Limpia el CSV dejando las últimas 72 horas, 
+    PERO PROTEGE EL DÍA ACTUAL (no borra el día de hoy).
+    """
+
+    if not csv_path.exists():
+
+        return
+
+    try:
+
+        df = pd.read_csv(csv_path)
+
+        if len(df) == 0:
+
+            return
+
+        df["timestamp"] = pd.to_datetime(
+            df["timestamp"],
+            utc=True,
+            errors="coerce",
+        )
+
+        df = df.dropna(subset=["timestamp"])
+        df = df.sort_values("timestamp")
+
+        hoy_utc = datetime.now(timezone.utc).date()
+        ts_max = df["timestamp"].max()
+        corte = ts_max - timedelta(hours=HORAS_RETENCION_CSV)
+
+        # Filtro de seguridad: NO tocar el día de hoy
+        df_hoy = df[df["timestamp"].dt.date == hoy_utc]
+        df_viejo = df[(df["timestamp"] < corte) & (df["timestamp"].dt.date != hoy_utc)]
+        df_reciente = df[(df["timestamp"] >= corte) & (df["timestamp"].dt.date != hoy_utc)]
+
+        if len(df_viejo) > 0:
+
+            ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+
+            sufijo = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+
+            archivo = ARCHIVE_DIR / f"{tipo}_{sufijo}.csv"
+
+            df_viejo.to_csv(archivo, index=False)
+
+            print(f"   Archivado {tipo}: {len(df_viejo):,} filas viejas")
+
+            df_final = pd.concat([df_reciente, df_hoy]).sort_values("timestamp")
+
+            df_final.to_csv(csv_path, index=False)
+
+            print(f"   🧹 LIMPIEZA {tipo}: CSV reducido a {len(df_final):,} filas (protegido el día de hoy)")
+
+    except Exception as e:
+
+        print(f"Error limpiando {tipo}: {e}")
 
 
 def notificar_rotacion(info):
@@ -1259,6 +1318,13 @@ def main():
                 f"en ~"
                 f"{dias_restantes:.1f} días"
             )
+
+    # --------------------------------------------------------
+    # LIMPIEZA SEGURA (PROTEGE EL DÍA DE HOY)
+    # --------------------------------------------------------
+    print()
+    print("🧹 Forzando limpieza de CSV 201-300 (protegido el día de hoy)...")
+    limpiar_csv_viejo(CSV_201_300, "201_300")
 
     # --------------------------------------------------------
     # API
