@@ -396,8 +396,8 @@ def rotar_csv():
 
 def limpiar_csv_viejo(csv_path, tipo):
     """
-    Limpia el CSV dejando las últimas 72 horas, 
-    PERO PROTEGE EL DÍA ACTUAL (no borra el día de hoy).
+    Limpia el CSV dejando SOLO las últimas 72 horas desde el último dato.
+    No depende del día de hoy, sino del dato más reciente en el archivo.
     """
 
     if not csv_path.exists():
@@ -421,14 +421,12 @@ def limpiar_csv_viejo(csv_path, tipo):
         df = df.dropna(subset=["timestamp"])
         df = df.sort_values("timestamp")
 
-        hoy_utc = datetime.now(timezone.utc).date()
+        # El corte se calcula desde el dato MÁS RECIENTE del archivo
         ts_max = df["timestamp"].max()
         corte = ts_max - timedelta(hours=HORAS_RETENCION_CSV)
 
-        # Filtro de seguridad: NO tocar el día de hoy
-        df_hoy = df[df["timestamp"].dt.date == hoy_utc]
-        df_viejo = df[(df["timestamp"] < corte) & (df["timestamp"].dt.date != hoy_utc)]
-        df_reciente = df[(df["timestamp"] >= corte) & (df["timestamp"].dt.date != hoy_utc)]
+        df_viejo = df[df["timestamp"] < corte]
+        df_reciente = df[df["timestamp"] >= corte]
 
         if len(df_viejo) > 0:
 
@@ -442,11 +440,13 @@ def limpiar_csv_viejo(csv_path, tipo):
 
             print(f"   Archivado {tipo}: {len(df_viejo):,} filas viejas")
 
-            df_final = pd.concat([df_reciente, df_hoy]).sort_values("timestamp")
+            df_reciente.to_csv(csv_path, index=False)
 
-            df_final.to_csv(csv_path, index=False)
+            print(f"   🧹 LIMPIEZA {tipo}: CSV reducido a {len(df_reciente):,} filas (últimas 72h)")
 
-            print(f"   🧹 LIMPIEZA {tipo}: CSV reducido a {len(df_final):,} filas (protegido el día de hoy)")
+        else:
+
+            print(f"   ✅ {tipo}: nada que limpiar (todo dentro de {HORAS_RETENCION_CSV}h)")
 
     except Exception as e:
 
@@ -1320,10 +1320,10 @@ def main():
             )
 
     # --------------------------------------------------------
-    # LIMPIEZA SEGURA (PROTEGE EL DÍA DE HOY)
+    # LIMPIEZA SEGURA (ÚLTIMAS 72 HORAS DESDE EL ÚLTIMO DATO)
     # --------------------------------------------------------
     print()
-    print("🧹 Forzando limpieza de CSV 201-300 (protegido el día de hoy)...")
+    print("🧹 Forzando limpieza de CSV 201-300 (últimas 72h)...")
     limpiar_csv_viejo(CSV_201_300, "201_300")
 
     # --------------------------------------------------------
