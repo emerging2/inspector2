@@ -3,40 +3,6 @@
 
 """
 CMC COLLECTOR 2 — RANGO 201-300
-
-Objetivo:
-    Construir un histórico del rango 201-300 de CoinMarketCap
-    para estudiar:
-
-    - monedas que empiezan a subir antes del pump
-    - acumulación
-    - expansión de volumen
-    - compresión
-    - mejora de ranking
-    - fuerza relativa
-    - rotación de capital
-    - monedas 201-300 que empiezan a entrar hacia Top 200
-    - posibles patrones previos a grandes movimientos
-
-IMPORTANTE:
-    Se consulta el TOP 300 completo para calcular correctamente
-    los rankings y métricas relativas.
-
-    SOLAMENTE se guardan las monedas 201-300.
-
-Uso:
-
-    python recolector_cmc2.py
-
-Requiere:
-
-    pip install requests pandas
-
-Variables:
-
-    CMC_API_KEY
-    TELEGRAM_BOT_TOKEN   (opcional)
-    TELEGRAM_CHAT_ID     (opcional)
 """
 
 import csv
@@ -45,6 +11,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -59,7 +26,6 @@ CMC_API_URL = (
 )
 
 TOP_N = 300
-
 TOP100_MAX = 100
 TOP200_MAX = 200
 TOP300_MAX = 300
@@ -70,15 +36,12 @@ TOP300_MAX = 300
 # ============================================================
 
 DATA_DIR = Path("data") / "cmc"
-
-# ESTE RECOLECTOR GUARDA SOLAMENTE 201-300
 CSV_201_300 = DATA_DIR / "market_history_201_300.csv"
-
 ROTATION_FILE = DATA_DIR / "last_rotation.txt"
 ARCHIVE_DIR = DATA_DIR / "archives"
 
 DIAS_ROTACION = 3
-HORAS_RETENCION_CSV = 72   # conservar 72h en el CSV activo tras rotar
+HORAS_RETENCION_CSV = 72
 
 TIMEOUT = 30
 
@@ -270,14 +233,10 @@ def rotar_csv():
         return None
 
     # --------------------------------------------------------
-    # NORMALIZAR TIMESTAMP
+    # NORMALIZAR TIMESTAMP (con parche)
     # --------------------------------------------------------
 
-    df["timestamp"] = pd.to_datetime(
-        df["timestamp"],
-        utc=True,
-        errors="coerce",
-    )
+    df["timestamp"] = parsear_timestamps(df["timestamp"])
 
     df = df.dropna(
         subset=["timestamp"]
@@ -288,17 +247,12 @@ def rotar_csv():
     )
 
     # --------------------------------------------------------
-    # CORTE 72H
+    # CORTE 72H (desde AHORA, no desde el último dato)
     # --------------------------------------------------------
 
     ts_max = df["timestamp"].max()
 
-    corte = (
-        ts_max
-        - timedelta(
-            hours=HORAS_RETENCION_CSV
-        )
-    )
+    corte = pd.Timestamp(ahora) - timedelta(hours=HORAS_RETENCION_CSV)
 
     df_reciente = df[
         df["timestamp"] >= corte
@@ -323,10 +277,7 @@ def rotar_csv():
             / f"201_300_{sufijo}.csv"
         )
 
-        df_viejo.to_csv(
-            destino,
-            index=False,
-        )
+        guardar_csv_normalizado(df_viejo, destino)
 
         tamaño_archive = (
             destino.stat().st_size
@@ -351,10 +302,7 @@ def rotar_csv():
     # CSV ACTIVO: SOLO ÚLTIMAS 72H
     # --------------------------------------------------------
 
-    df_reciente.to_csv(
-        CSV_201_300,
-        index=False,
-    )
+    guardar_csv_normalizado(df_reciente, CSV_201_300)
 
     print(
         f"CSV 201-300 conserva "
@@ -392,65 +340,6 @@ def rotar_csv():
     )
 
     return info
-
-
-def limpiar_csv_viejo(csv_path, tipo):
-    """
-    Limpia el CSV dejando SOLO las últimas 72 horas desde el último dato.
-    No depende del día de hoy, sino del dato más reciente en el archivo.
-    """
-
-    if not csv_path.exists():
-
-        return
-
-    try:
-
-        df = pd.read_csv(csv_path)
-
-        if len(df) == 0:
-
-            return
-
-        df["timestamp"] = pd.to_datetime(
-            df["timestamp"],
-            utc=True,
-            errors="coerce",
-        )
-
-        df = df.dropna(subset=["timestamp"])
-        df = df.sort_values("timestamp")
-
-        # El corte se calcula desde el dato MÁS RECIENTE del archivo
-        ts_max = df["timestamp"].max()
-        corte = ts_max - timedelta(hours=HORAS_RETENCION_CSV)
-
-        df_viejo = df[df["timestamp"] < corte]
-        df_reciente = df[df["timestamp"] >= corte]
-
-        if len(df_viejo) > 0:
-
-            ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-
-            sufijo = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
-
-            archivo = ARCHIVE_DIR / f"{tipo}_{sufijo}.csv"
-
-            df_viejo.to_csv(archivo, index=False)
-
-            print(f"   Archivado {tipo}: {len(df_viejo):,} filas viejas")
-
-            df_reciente.to_csv(csv_path, index=False)
-
-            print(f"   🧹 LIMPIEZA {tipo}: CSV reducido a {len(df_reciente):,} filas (últimas 72h)")
-
-        else:
-
-            print(f"   ✅ {tipo}: nada que limpiar (todo dentro de {HORAS_RETENCION_CSV}h)")
-
-    except Exception as e:
-
-        print(f"Error limpiando {tipo}: {e}")
 
 
 def notificar_rotacion(info):
@@ -509,125 +398,139 @@ def notificar_rotacion(info):
 
 
 # ============================================================
+# UTILIDADES DE TIMESTAMP (PARCHE)
+# ============================================================
+
+FORMATO_TS = "%Y-%m-%dT%H:%M:%S+00:00"
+
+
+def parsear_timestamps(col):
+    """ISO8601 -> mixto -> epoch. Lo que no se pueda leer queda NaT."""
+    s = col.astype(str).str.strip()
+    t = pd.to_datetime(s, utc=True, errors="coerce", format="ISO8601")
+    mal = t.isna()
+    if mal.any():
+        try:
+            t2 = pd.to_datetime(s[mal], utc=True, errors="coerce", format="mixed")
+        except (ValueError, TypeError):
+            t2 = pd.to_datetime(s[mal], utc=True, errors="coerce")
+        t = t.fillna(t2)
+        mal = t.isna()
+    if mal.any():
+        n = pd.to_numeric(s[mal], errors="coerce").dropna()
+        if len(n):
+            ms, sg = n[n > 1e11], n[n <= 1e11]
+            if len(ms):
+                t.loc[ms.index] = pd.to_datetime(ms, unit="ms", utc=True)
+            if len(sg):
+                t.loc[sg.index] = pd.to_datetime(sg, unit="s", utc=True)
+    return t
+
+
+def guardar_csv_normalizado(df, ruta):
+    """Escribe el CSV con UN solo formato de timestamp (ISO con T, sin fracción, +00:00)."""
+    out = df.copy()
+    out["timestamp"] = out["timestamp"].dt.tz_convert("UTC").dt.strftime(FORMATO_TS)
+    out.to_csv(ruta, index=False)
+
+
+def limpiar_csv_viejo(csv_path, tipo, ahora=None):
+    """
+    Deja SOLO las últimas HORAS_RETENCION_CSV horas contadas desde AHORA
+    (no desde el último dato del archivo). Reescribe el archivo con un formato
+    de timestamp único. Las filas con timestamp ilegible NO se borran en silencio:
+    se guardan en archives/ y se avisa por pantalla.
+    """
+    if not csv_path.exists():
+        return
+
+    ahora = pd.Timestamp(ahora or datetime.now(timezone.utc))
+    if ahora.tzinfo is None:
+        ahora = ahora.tz_localize("UTC")
+
+    try:
+        df = pd.read_csv(csv_path, low_memory=False)
+        if len(df) == 0:
+            return
+        n0 = len(df)
+
+        df["timestamp"] = parsear_timestamps(df["timestamp"])
+        ilegibles = df[df["timestamp"].isna()]
+        df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
+
+        corte = ahora - timedelta(hours=HORAS_RETENCION_CSV)
+        reciente = df[df["timestamp"] >= corte]
+        n_viejas = int((df["timestamp"] < corte).sum())
+
+        if len(ilegibles) > 0:
+            ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+            ruta_ileg = ARCHIVE_DIR / f"{tipo}_ilegibles_{ahora.strftime('%Y%m%d_%H%M')}.csv"
+            ilegibles.to_csv(ruta_ileg, index=False)
+            print(f"   ⚠️ {len(ilegibles):,} filas con timestamp ilegible -> {ruta_ileg.name}")
+
+        guardar_csv_normalizado(reciente, csv_path)
+
+        ts_min = reciente["timestamp"].min() if len(reciente) else None
+        print(f"   🧹 {tipo}: {n0:,} filas -> {len(reciente):,} "
+              f"(quitadas {n_viejas:,} de más de {HORAS_RETENCION_CSV}h"
+              f"{'; datos desde ' + ts_min.strftime('%d-%b %H:%M') + ' UTC' if ts_min is not None else ''})")
+
+    except Exception as e:
+        print(f"Error limpiando {tipo}: {e}")
+
+
+# ============================================================
 # COLUMNAS
 # ============================================================
 
 CSV_COLUMNS = [
-
-    # Identificación
-    "snapshot_id",
-    "timestamp",
-
-    "cmc_id",
-    "name",
-    "symbol",
-    "slug",
-
-    # Ranking
-    "cmc_rank",
-    "segment",
-
-    # Precio
+    "snapshot_id", "timestamp",
+    "cmc_id", "name", "symbol", "slug",
+    "cmc_rank", "segment",
     "price",
-
-    # Momentum
-    "percent_change_1h",
-    "percent_change_24h",
-    "percent_change_7d",
-    "percent_change_30d",
-    "percent_change_60d",
-    "percent_change_90d",
-
-    # Volumen
-    "volume_24h",
-    "volume_change_24h",
-
-    # Market cap
-    "market_cap",
-    "market_cap_dominance",
-
-    # Métricas derivadas
-    "volume_marketcap_ratio",
-    "marketcap_volume_ratio",
-
-    # Flags
-    "is_top100",
-    "is_top200",
-    "is_top300",
-
-    # Rankings del snapshot
-    "rank_gainer_300",
-    "rank_loser_300",
-    "rank_volume_300",
-
-    # Ranking por segmento
-    "rank_gainer_segment",
-    "rank_volume_segment",
-
+    "percent_change_1h", "percent_change_24h", "percent_change_7d",
+    "percent_change_30d", "percent_change_60d", "percent_change_90d",
+    "volume_24h", "volume_change_24h",
+    "market_cap", "market_cap_dominance",
+    "volume_marketcap_ratio", "marketcap_volume_ratio",
+    "is_top100", "is_top200", "is_top300",
+    "rank_gainer_300", "rank_loser_300", "rank_volume_300",
+    "rank_gainer_segment", "rank_volume_segment",
 ]
 
 
 # ============================================================
-# UTILIDADES
+# UTILIDADES GENERALES
 # ============================================================
 
 def get_api_key():
-
-    api_key = os.getenv(
-        "CMC_API_KEY"
-    )
-
+    api_key = os.getenv("CMC_API_KEY")
     if not api_key:
-
-        print(
-            "ERROR: No existe "
-            "CMC_API_KEY."
-        )
-
+        print("ERROR: No existe CMC_API_KEY.")
         sys.exit(1)
-
     return api_key
 
 
 def safe_float(value):
-
     if value is None:
-
         return None
-
     try:
-
         return float(value)
-
-    except (
-        TypeError,
-        ValueError
-    ):
-
+    except (TypeError, ValueError):
         return None
 
 
 def create_snapshot_id(timestamp):
-
-    return timestamp.strftime(
-        "%Y%m%d_%H%M%S"
-    )
+    return timestamp.strftime("%Y%m%d_%H%M%S")
 
 
 def segmento(rank):
-
     if rank <= 100:
-
         return "top100"
-
     if rank <= 200:
-
         return "101_200"
-
     if rank <= 300:
-
         return "201_300"
-
     return "outside"
 
 
@@ -636,102 +539,41 @@ def segmento(rank):
 # ============================================================
 
 def fetch_monedas(api_key):
-
     headers = {
-
         "Accepts": "application/json",
-
         "X-CMC_PRO_API_KEY": api_key,
-
     }
-
     params = {
-
-        # IMPORTANTE:
-        # Consultamos TOP 300 completo para poder
-        # calcular rankings relativos correctamente.
-
         "start": 1,
-
         "limit": TOP_N,
-
         "convert": "USD",
-
         "sort": "market_cap",
-
         "sort_dir": "desc",
-
         "cryptocurrency_type": "all",
-
     }
 
-    print(
-        f"Consultando CoinMarketCap "
-        f"(TOP {TOP_N})..."
-    )
-
-    r = requests.get(
-        CMC_API_URL,
-        headers=headers,
-        params=params,
-        timeout=TIMEOUT,
-    )
-
-    print(
-        f"HTTP: {r.status_code}"
-    )
+    print(f"Consultando CoinMarketCap (TOP {TOP_N})...")
+    r = requests.get(CMC_API_URL, headers=headers, params=params, timeout=TIMEOUT)
+    print(f"HTTP: {r.status_code}")
 
     if r.status_code != 200:
-
-        print(
-            r.text
-        )
-
+        print(r.text)
         r.raise_for_status()
 
     payload = r.json()
+    status = payload.get("status", {})
 
-    status = payload.get(
-        "status",
-        {}
-    )
-
-    if status.get(
-        "error_code",
-        0
-    ) != 0:
-
-        print(
-            "ERROR CMC:",
-            status
-        )
-
+    if status.get("error_code", 0) != 0:
+        print("ERROR CMC:", status)
         sys.exit(1)
 
-    data = payload.get(
-        "data",
-        []
-    )
-
+    data = payload.get("data", [])
     if not data:
-
-        print(
-            "ERROR: CMC no devolvió "
-            "monedas."
-        )
-
+        print("ERROR: CMC no devolvió monedas.")
         sys.exit(1)
 
-    print(
-        f"Monedas recibidas: "
-        f"{len(data)}"
-    )
-
-    print(
-        f"Credits utilizados: "
-        f"{status.get('credit_count')}"
-    )
-
+    print(f"Monedas recibidas: {len(data)}")
+    print(f"Credits utilizados: {status.get('credit_count')}")
     return data
 
 
@@ -740,207 +582,51 @@ def fetch_monedas(api_key):
 # ============================================================
 
 def calculate_rankings(coins):
-
     def change_24h(c):
-
-        q = c.get(
-            "quote",
-            {}
-        ).get(
-            "USD",
-            {}
-        )
-
-        return safe_float(
-            q.get(
-                "percent_change_24h"
-            )
-        )
+        q = c.get("quote", {}).get("USD", {})
+        return safe_float(q.get("percent_change_24h"))
 
     def volume(c):
+        q = c.get("quote", {}).get("USD", {})
+        return safe_float(q.get("volume_24h"))
 
-        q = c.get(
-            "quote",
-            {}
-        ).get(
-            "USD",
-            {}
-        )
-
-        return safe_float(
-            q.get(
-                "volume_24h"
-            )
-        )
-
-    losers = sorted(
-        coins,
-        key=lambda c: (
-            change_24h(c)
-            if change_24h(c) is not None
-            else float("inf")
-        )
-    )
-
-    gainers = sorted(
-        coins,
-        key=lambda c: (
-            change_24h(c)
-            if change_24h(c) is not None
-            else float("-inf")
-        ),
-        reverse=True,
-    )
-
-    volumes = sorted(
-        coins,
-        key=lambda c: (
-            volume(c)
-            if volume(c) is not None
-            else float("-inf")
-        ),
-        reverse=True,
-    )
+    losers = sorted(coins, key=lambda c: (change_24h(c) if change_24h(c) is not None else float("inf")))
+    gainers = sorted(coins, key=lambda c: (change_24h(c) if change_24h(c) is not None else float("-inf")), reverse=True)
+    volumes = sorted(coins, key=lambda c: (volume(c) if volume(c) is not None else float("-inf")), reverse=True)
 
     return (
-
-        {
-            c["id"]: p
-            for p, c
-            in enumerate(
-                losers,
-                start=1
-            )
-        },
-
-        {
-            c["id"]: p
-            for p, c
-            in enumerate(
-                gainers,
-                start=1
-            )
-        },
-
-        {
-            c["id"]: p
-            for p, c
-            in enumerate(
-                volumes,
-                start=1
-            )
-        },
-
+        {c["id"]: p for p, c in enumerate(losers, start=1)},
+        {c["id"]: p for p, c in enumerate(gainers, start=1)},
+        {c["id"]: p for p, c in enumerate(volumes, start=1)},
     )
 
 
 def calculate_segment_rankings(coins):
-
     resultado = {}
-
-    segmentos = {
-
-        "top100": [],
-
-        "101_200": [],
-
-        "201_300": [],
-
-    }
+    segmentos = {"top100": [], "101_200": [], "201_300": []}
 
     for coin in coins:
-
-        rank = (
-            coin.get("cmc_rank")
-            or 99999
-        )
-
+        rank = (coin.get("cmc_rank") or 99999)
         seg = segmento(rank)
-
         if seg in segmentos:
-
-            segmentos[seg].append(
-                coin
-            )
+            segmentos[seg].append(coin)
 
     for seg, lista in segmentos.items():
-
         if not lista:
-
             continue
 
         def ch(c):
-
-            return safe_float(
-                c.get(
-                    "quote",
-                    {}
-                ).get(
-                    "USD",
-                    {}
-                ).get(
-                    "percent_change_24h"
-                )
-            )
+            return safe_float(c.get("quote", {}).get("USD", {}).get("percent_change_24h"))
 
         def vol(c):
+            return safe_float(c.get("quote", {}).get("USD", {}).get("volume_24h"))
 
-            return safe_float(
-                c.get(
-                    "quote",
-                    {}
-                ).get(
-                    "USD",
-                    {}
-                ).get(
-                    "volume_24h"
-                )
-            )
-
-        gainers = sorted(
-            lista,
-            key=lambda c:
-                ch(c)
-                if ch(c) is not None
-                else float("-inf"),
-            reverse=True,
-        )
-
-        volumes = sorted(
-            lista,
-            key=lambda c:
-                vol(c)
-                if vol(c) is not None
-                else float("-inf"),
-            reverse=True,
-        )
+        gainers = sorted(lista, key=lambda c: ch(c) if ch(c) is not None else float("-inf"), reverse=True)
+        volumes = sorted(lista, key=lambda c: vol(c) if vol(c) is not None else float("-inf"), reverse=True)
 
         resultado[seg] = {
-
-            "gainer": {
-
-                c["id"]: p
-
-                for p, c
-                in enumerate(
-                    gainers,
-                    start=1
-                )
-
-            },
-
-            "volume": {
-
-                c["id"]: p
-
-                for p, c
-                in enumerate(
-                    volumes,
-                    start=1
-                )
-
-            },
-
+            "gainer": {c["id"]: p for p, c in enumerate(gainers, start=1)},
+            "volume": {c["id"]: p for p, c in enumerate(volumes, start=1)},
         }
 
     return resultado
@@ -950,248 +636,68 @@ def calculate_segment_rankings(coins):
 # CONSTRUIR REGISTROS
 # ============================================================
 
-def build_records(
-    coins,
-    timestamp,
-):
-
-    snapshot_id = (
-        create_snapshot_id(
-            timestamp
-        )
-    )
-
-    (
-        loser_rank,
-        gainer_rank,
-        volume_rank,
-    ) = calculate_rankings(
-        coins
-    )
-
-    segment_rankings = (
-        calculate_segment_rankings(
-            coins
-        )
-    )
+def build_records(coins, timestamp):
+    snapshot_id = create_snapshot_id(timestamp)
+    loser_rank, gainer_rank, volume_rank = calculate_rankings(coins)
+    segment_rankings = calculate_segment_rankings(coins)
 
     records = []
 
     for coin in coins:
-
-        q = coin.get(
-            "quote",
-            {}
-        ).get(
-            "USD",
-            {}
-        )
-
-        rank = (
-            coin.get("cmc_rank")
-            or 99999
-        )
-
+        q = coin.get("quote", {}).get("USD", {})
+        rank = (coin.get("cmc_rank") or 99999)
         seg = segmento(rank)
 
-        # ====================================================
-        # SOLAMENTE 201-300
-        # ====================================================
-
         if seg != "201_300":
-
             continue
 
-        price = safe_float(
-            q.get("price")
-        )
+        price = safe_float(q.get("price"))
+        volume_24h = safe_float(q.get("volume_24h"))
+        market_cap = safe_float(q.get("market_cap"))
 
-        volume_24h = safe_float(
-            q.get("volume_24h")
-        )
-
-        market_cap = safe_float(
-            q.get("market_cap")
-        )
-
-        # ====================================================
-        # VOLUMEN / MARKET CAP
-        # ====================================================
-
-        if (
-            volume_24h is not None
-            and market_cap is not None
-            and market_cap > 0
-        ):
-
-            volume_marketcap_ratio = (
-                volume_24h
-                / market_cap
-                * 100
-            )
-
-            marketcap_volume_ratio = (
-                market_cap
-                / volume_24h
-                if volume_24h > 0
-                else None
-            )
-
+        if volume_24h is not None and market_cap is not None and market_cap > 0:
+            volume_marketcap_ratio = volume_24h / market_cap * 100
+            marketcap_volume_ratio = market_cap / volume_24h if volume_24h > 0 else None
         else:
-
             volume_marketcap_ratio = None
-
             marketcap_volume_ratio = None
 
         seg_gainer = None
-
         seg_volume = None
-
         if seg in segment_rankings:
-
-            seg_gainer = (
-                segment_rankings[seg]
-                ["gainer"]
-                .get(
-                    coin.get("id")
-                )
-            )
-
-            seg_volume = (
-                segment_rankings[seg]
-                ["volume"]
-                .get(
-                    coin.get("id")
-                )
-            )
+            seg_gainer = segment_rankings[seg]["gainer"].get(coin.get("id"))
+            seg_volume = segment_rankings[seg]["volume"].get(coin.get("id"))
 
         records.append({
-
-            "snapshot_id":
-                snapshot_id,
-
-            "timestamp":
-                timestamp.isoformat(),
-
-            "cmc_id":
-                coin.get("id"),
-
-            "name":
-                coin.get("name"),
-
-            "symbol":
-                coin.get("symbol"),
-
-            "slug":
-                coin.get("slug"),
-
-            "cmc_rank":
-                rank,
-
-            "segment":
-                seg,
-
-            "price":
-                price,
-
-            "percent_change_1h":
-                safe_float(
-                    q.get(
-                        "percent_change_1h"
-                    )
-                ),
-
-            "percent_change_24h":
-                safe_float(
-                    q.get(
-                        "percent_change_24h"
-                    )
-                ),
-
-            "percent_change_7d":
-                safe_float(
-                    q.get(
-                        "percent_change_7d"
-                    )
-                ),
-
-            "percent_change_30d":
-                safe_float(
-                    q.get(
-                        "percent_change_30d"
-                    )
-                ),
-
-            "percent_change_60d":
-                safe_float(
-                    q.get(
-                        "percent_change_60d"
-                    )
-                ),
-
-            "percent_change_90d":
-                safe_float(
-                    q.get(
-                        "percent_change_90d"
-                    )
-                ),
-
-            "volume_24h":
-                volume_24h,
-
-            "volume_change_24h":
-                safe_float(
-                    q.get(
-                        "volume_change_24h"
-                    )
-                ),
-
-            "market_cap":
-                market_cap,
-
-            "market_cap_dominance":
-                safe_float(
-                    q.get(
-                        "market_cap_dominance"
-                    )
-                ),
-
-            "volume_marketcap_ratio":
-                volume_marketcap_ratio,
-
-            "marketcap_volume_ratio":
-                marketcap_volume_ratio,
-
-            "is_top100":
-                0,
-
-            "is_top200":
-                0,
-
-            "is_top300":
-                1,
-
-            "rank_gainer_300":
-                gainer_rank.get(
-                    coin.get("id")
-                ),
-
-            "rank_loser_300":
-                loser_rank.get(
-                    coin.get("id")
-                ),
-
-            "rank_volume_300":
-                volume_rank.get(
-                    coin.get("id")
-                ),
-
-            "rank_gainer_segment":
-                seg_gainer,
-
-            "rank_volume_segment":
-                seg_volume,
-
+            "snapshot_id": snapshot_id,
+            "timestamp": timestamp.replace(microsecond=0).isoformat(),
+            "cmc_id": coin.get("id"),
+            "name": coin.get("name"),
+            "symbol": coin.get("symbol"),
+            "slug": coin.get("slug"),
+            "cmc_rank": rank,
+            "segment": seg,
+            "price": price,
+            "percent_change_1h": safe_float(q.get("percent_change_1h")),
+            "percent_change_24h": safe_float(q.get("percent_change_24h")),
+            "percent_change_7d": safe_float(q.get("percent_change_7d")),
+            "percent_change_30d": safe_float(q.get("percent_change_30d")),
+            "percent_change_60d": safe_float(q.get("percent_change_60d")),
+            "percent_change_90d": safe_float(q.get("percent_change_90d")),
+            "volume_24h": volume_24h,
+            "volume_change_24h": safe_float(q.get("volume_change_24h")),
+            "market_cap": market_cap,
+            "market_cap_dominance": safe_float(q.get("market_cap_dominance")),
+            "volume_marketcap_ratio": volume_marketcap_ratio,
+            "marketcap_volume_ratio": marketcap_volume_ratio,
+            "is_top100": 0,
+            "is_top200": 0,
+            "is_top300": 1,
+            "rank_gainer_300": gainer_rank.get(coin.get("id")),
+            "rank_loser_300": loser_rank.get(coin.get("id")),
+            "rank_volume_300": volume_rank.get(coin.get("id")),
+            "rank_gainer_segment": seg_gainer,
+            "rank_volume_segment": seg_volume,
         })
 
     return records
@@ -1201,42 +707,17 @@ def build_records(
 # GUARDADO
 # ============================================================
 
-def save_records(
-    records,
-    archivo
-):
-
-    DATA_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
+def save_records(records, archivo):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     file_exists = archivo.exists()
 
-    with archivo.open(
-        "a",
-        newline="",
-        encoding="utf-8"
-    ) as f:
-
-        writer = csv.DictWriter(
-            f,
-            fieldnames=CSV_COLUMNS
-        )
-
+    with archivo.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
         if not file_exists:
-
             writer.writeheader()
+        writer.writerows(records)
 
-        writer.writerows(
-            records
-        )
-
-    print(
-        f"Guardado: "
-        f"{len(records)} registros "
-        f"→ {archivo.name}"
-    )
+    print(f"Guardado: {len(records)} registros → {archivo.name}")
 
 
 # ============================================================
@@ -1244,267 +725,65 @@ def save_records(
 # ============================================================
 
 def main():
-
-    print()
-
+    print("\n" + "=" * 100)
+    print("🚨 CMC COLLECTOR — RANGO 201-300")
     print("=" * 100)
-
-    print(
-        "🚨 CMC COLLECTOR — "
-        "RANGO 201-300"
-    )
-
-    print("=" * 100)
-
-    # --------------------------------------------------------
-    # ROTACIÓN
-    # --------------------------------------------------------
 
     inicializar_rotacion()
 
     if toca_rotar():
-
-        print(
-            f"Han pasado "
-            f"{DIAS_ROTACION}+ días."
-        )
-
-        print(
-            "Rotando histórico 201-300..."
-        )
-
+        print(f"Han pasado {DIAS_ROTACION}+ días.")
+        print("Rotando histórico 201-300...")
         info = rotar_csv()
-
         if info:
-
-            notificar_rotacion(
-                info
-            )
-
+            notificar_rotacion(info)
     else:
-
-        ultima = (
-            leer_ultima_rotacion()
-        )
-
+        ultima = leer_ultima_rotacion()
         if ultima:
-
-            ahora = (
-                datetime.now(
-                    timezone.utc
-                )
-            )
-
+            ahora = datetime.now(timezone.utc)
             if ultima.tzinfo is None:
+                ultima = ultima.replace(tzinfo=timezone.utc)
+            dias_transcurridos = (ahora - ultima).total_seconds() / 86400
+            dias_restantes = max(0, DIAS_ROTACION - dias_transcurridos)
+            print(f"Próxima rotación en ~{dias_restantes:.1f} días")
 
-                ultima = (
-                    ultima.replace(
-                        tzinfo=timezone.utc
-                    )
-                )
-
-            dias_transcurridos = (
-                ahora - ultima
-            ).total_seconds() / 86400
-
-            dias_restantes = max(
-                0,
-                DIAS_ROTACION
-                - dias_transcurridos
-            )
-
-            print(
-                f"Próxima rotación "
-                f"en ~"
-                f"{dias_restantes:.1f} días"
-            )
-
-    # --------------------------------------------------------
-    # LIMPIEZA SEGURA (ÚLTIMAS 72 HORAS DESDE EL ÚLTIMO DATO)
-    # --------------------------------------------------------
     print()
     print("🧹 Forzando limpieza de CSV 201-300 (últimas 72h)...")
     limpiar_csv_viejo(CSV_201_300, "201_300")
 
-    # --------------------------------------------------------
-    # API
-    # --------------------------------------------------------
-
     api_key = get_api_key()
-
-    timestamp = (
-        datetime.now(
-            timezone.utc
-        )
-    )
-
-    coins = fetch_monedas(
-        api_key
-    )
-
-    # --------------------------------------------------------
-    # CONTAR SEGMENTOS
-    # --------------------------------------------------------
+    timestamp = datetime.now(timezone.utc)
+    coins = fetch_monedas(api_key)
 
     top100 = []
-
     rango101_200 = []
-
     rango201_300 = []
 
     for coin in coins:
-
-        rank = (
-            coin.get(
-                "cmc_rank"
-            )
-            or 99999
-        )
-
+        rank = (coin.get("cmc_rank") or 99999)
         if rank <= 100:
-
-            top100.append(
-                coin
-            )
-
+            top100.append(coin)
         elif rank <= 200:
-
-            rango101_200.append(
-                coin
-            )
-
+            rango101_200.append(coin)
         elif rank <= 300:
-
-            rango201_300.append(
-                coin
-            )
+            rango201_300.append(coin)
 
     print()
+    print("División TOP 300:")
+    print(f"  TOP 100:   {len(top100)}")
+    print(f"  101-200:   {len(rango101_200)}")
+    print(f"  201-300:   {len(rango201_300)}")
 
-    print(
-        "División TOP 300:"
-    )
-
-    print(
-        f"  TOP 100:   "
-        f"{len(top100)}"
-    )
-
-    print(
-        f"  101-200:   "
-        f"{len(rango101_200)}"
-    )
-
-    print(
-        f"  201-300:   "
-        f"{len(rango201_300)}"
-    )
-
-    # --------------------------------------------------------
-    # CONSTRUIR REGISTROS
-    # --------------------------------------------------------
-
-    records = build_records(
-        coins,
-        timestamp
-    )
-
-    # --------------------------------------------------------
-    # GUARDAR SOLAMENTE 201-300
-    # --------------------------------------------------------
-
-    save_records(
-        records,
-        CSV_201_300
-    )
-
-    # --------------------------------------------------------
-    # RESUMEN
-    # --------------------------------------------------------
+    records = build_records(coins, timestamp)
+    save_records(records, CSV_201_300)
 
     print()
-
     print("=" * 100)
-
-    print(
-        "✅ CAPTURA 201-300 FINALIZADA"
-    )
-
+    print("✅ CAPTURA 201-300 FINALIZADA")
     print("=" * 100)
-
-    print(
-        f"Snapshot: "
-        f"{timestamp.isoformat()}"
-    )
-
-    print(
-        f"Monedas 201-300 guardadas: "
-        f"{len(records)}"
-    )
-
-    print(
-        "Archivo:"
-    )
-
-    print(
-        f"  → {CSV_201_300}"
-    )
-
-    print()
-
-    print(
-        "🎯 Objetivo del histórico:"
-    )
-
-    print(
-        "  Detectar monedas que:"
-    )
-
-    print(
-        "  1. mejoran ranking"
-    )
-
-    print(
-        "  2. aumentan volumen"
-    )
-
-    print(
-        "  3. mantienen precio comprimido"
-    )
-
-    print(
-        "  4. ganan fuerza relativa"
-    )
-
-    print(
-        "  5. pasan 201-300 → 101-200"
-    )
-
-    print(
-        "  6. posteriormente entran al Top 100"
-    )
-
-    print(
-        "  7. finalmente desarrollan el pump"
-    )
-
-    print()
-
-    print(
-        "💡 IMPORTANTE:"
-    )
-
-    print(
-        "El recolector NO intenta decidir "
-        "qué comprar."
-    )
-
-    print(
-        "Su trabajo es guardar suficiente "
-        "histórico para que el analizador "
-        "descubra qué patrones aparecen "
-        "ANTES de los pumps."
-    )
+    print(f"Snapshot: {timestamp.isoformat()}")
+    print(f"Monedas 201-300 guardadas: {len(records)}")
+    print(f"Archivo: {CSV_201_300}")
 
 
 # ============================================================
@@ -1512,21 +791,10 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-
     try:
-
         main()
-
     except Exception as e:
-
-        print()
-
-        print(
-            f"❌ ERROR: {e}"
-        )
-
+        print(f"\n❌ ERROR: {e}")
         import traceback
-
         traceback.print_exc()
-
         sys.exit(1)
