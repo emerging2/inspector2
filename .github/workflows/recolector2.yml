@@ -27,13 +27,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ⬇️ ESTE ES EL CAMBIO: git pull ANTES de ejecutar el script
-      - name: Pull latest changes
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git pull origin main
-
       - name: Run CMC Collector
         env:
           CMC_API_KEY: ${{ secrets.TOKEN_COINB }}
@@ -55,6 +48,10 @@ jobs:
 
           git add data/cmc/
 
-          # FORZAR commit y push siempre
-          git commit --allow-empty -m "Update CMC 201-300 history"
-          git push
+          if git diff --cached --quiet; then
+            echo "No hay cambios para guardar."
+          else
+            git commit -m "Update CMC 201-300 history"
+            git pull --rebase origin main || true
+            git push
+          fi
