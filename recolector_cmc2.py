@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-CMC COLLECTOR 2 — RANGO 201-300  (v3: archivos diarios)
+CMC COLLECTOR 2 — RANGO 201-300  (v4: híbrido 4 días)
 """
 
 import csv
@@ -11,7 +11,6 @@ import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import requests
 
@@ -26,33 +25,17 @@ CMC_API_URL = (
 )
 
 TOP_N = 300
-TOP100_MAX = 100
-TOP200_MAX = 200
-TOP300_MAX = 300
-
 
 # ============================================================
-# ARCHIVOS  (v3: un archivo por día)
+# ARCHIVOS (v4: archivo activo de 4 días)
 # ============================================================
 
 DATA_DIR = Path("data") / "cmc"
+CSV_201_300 = DATA_DIR / "market_history_201_300.csv"  # Archivo activo
 
-# Archivo del día actual (se crea uno nuevo cada día)
-HOY = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-CSV_201_300 = DATA_DIR / f"market_history_201_300_{HOY}.csv"
-
-# (Ya no se usa rotación ni limpieza)
-# ROTATION_FILE = DATA_DIR / "last_rotation.txt"
-# ARCHIVE_DIR = DATA_DIR / "archives"
-# DIAS_ROTACION = 3
-# HORAS_RETENCION_CSV = 72
+DIAS_VENTANA = 4  # hoy + 3 anteriores
 
 TIMEOUT = 30
-
-
-# ============================================================
-# GITHUB
-# ============================================================
 
 GITHUB_USER = "emerging2"
 GITHUB_REPO = "inspector2"
@@ -100,7 +83,7 @@ CSV_COLUMNS = [
 
 
 # ============================================================
-# UTILIDADES GENERALES
+# UTILIDADES
 # ============================================================
 
 def get_api_key():
@@ -304,7 +287,7 @@ def build_records(coins, timestamp):
 
 
 # ============================================================
-# GUARDADO  (append al archivo del día)
+# GUARDAR (append al archivo activo)
 # ============================================================
 
 def save_records(records, archivo):
@@ -321,13 +304,52 @@ def save_records(records, archivo):
 
 
 # ============================================================
+# ROTACIÓN INTELIGENTE
+# ============================================================
+
+def rotar_archivo_activo(csv_path, tipo):
+    if not csv_path.exists():
+        return
+
+    print(f"  🔄 Rotando {csv_path.name}...")
+
+    try:
+        df = pd.read_csv(csv_path, low_memory=False)
+    except Exception as e:
+        print(f"  ⚠️ Error leyendo {csv_path.name}: {e}")
+        return
+
+    if len(df) == 0:
+        return
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce", format="mixed")
+    df = df.dropna(subset=["timestamp"])
+    df = df.sort_values("timestamp")
+
+    hoy = datetime.now(timezone.utc).date()
+    fecha_corte = hoy - timedelta(days=DIAS_VENTANA - 1)
+
+    df_viejos = df[df["timestamp"].dt.date < fecha_corte]
+    df_recientes = df[df["timestamp"].dt.date >= fecha_corte]
+
+    if len(df_viejos) > 0:
+        for fecha, grupo in df_viejos.groupby(df_viejos["timestamp"].dt.date):
+            archivo_diario = DATA_DIR / f"market_history_{tipo}_{fecha.isoformat()}.csv"
+            grupo.to_csv(archivo_diario, index=False)
+            print(f"  📁 Día {fecha} extraído → {archivo_diario.name} ({len(grupo):,} filas)")
+
+    df_recientes.to_csv(csv_path, index=False)
+    print(f"  ✅ {csv_path.name} conserva {len(df_recientes):,} filas "
+          f"(desde {df_recientes['timestamp'].min()} hasta {df_recientes['timestamp'].max()})")
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
 def main():
     print("\n" + "=" * 100)
-    print("🚨 CMC COLLECTOR — RANGO 201-300 (v3: archivos diarios)")
-    print(f"Archivo del día: {CSV_201_300.name}")
+    print("🚨 CMC COLLECTOR — RANGO 201-300 (v4: híbrido 4 días)")
     print("=" * 100)
 
     api_key = get_api_key()
@@ -356,13 +378,16 @@ def main():
     records = build_records(coins, timestamp)
     save_records(records, CSV_201_300)
 
+    print("\n📦 Rotación de archivos activos...")
+    rotar_archivo_activo(CSV_201_300, "201_300")
+
     print()
     print("=" * 100)
     print("✅ CAPTURA 201-300 FINALIZADA")
     print("=" * 100)
     print(f"Snapshot: {timestamp.isoformat()}")
     print(f"Monedas 201-300 guardadas: {len(records)}")
-    print(f"Archivo: {CSV_201_300}")
+    print(f"Archivo activo: {CSV_201_300}")
 
 
 # ============================================================
