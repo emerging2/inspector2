@@ -6,28 +6,29 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: cmc-collector-201-300
+  cancel-in-progress: false
+
 jobs:
   collect:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install requests pandas
 
-      - name: Run CMC Collector
+      - name: Run CMC collector 201-300
         env:
           CMC_API_KEY: ${{ secrets.TOKEN_COINB }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -35,23 +36,17 @@ jobs:
         run: |
           python recolector_cmc2.py
 
-      - name: Commit collected data
+      - name: Save collected data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          if [ -d data/cmc/archives ]; then
-            for tipo in 201_300; do
-              ls -t data/cmc/archives/${tipo}_*.csv 2>/dev/null | tail -n +2 | xargs rm -f 2>/dev/null || true
-            done
-          fi
 
           git add data/cmc/
 
           if git diff --cached --quiet; then
             echo "No hay cambios para guardar."
           else
-            git commit -m "Update CMC 201-300 history"
-            git fetch origin main
-            git push origin HEAD:main --force
+            git commit -m "data: collect CMC market snapshot 201-300"
+            git pull --rebase origin main
+            git push
           fi
